@@ -12,14 +12,14 @@ import plotly.graph_objects as go
 # =================================================================
 st.set_page_config(page_title="Blue Solutions - Gestão Energética", layout="wide")
 
-# Tenta pegar dos Segredos (Nuvem/Local Seguro), senão usa string direta (Fallback)
+# Tenta pegar dos Segredos, senão usa string direta (Fallback para testes locais)
 try:
     DB_CONFIG = st.secrets["database"]["url"]
     MINHA_API_KEY = st.secrets["gemini"]["api_key"]
 except:
-    # Caso você ainda não tenha configurado o secrets.toml, ele avisa
-    st.error("⚠️ Credenciais não encontradas! Configure o .streamlit/secrets.toml")
-    st.stop()
+    # Se não tiver secrets configurado, usa as credenciais hardcoded (CUIDADO AO PUBLICAR)
+    DB_CONFIG = "postgresql://postgres:$Uriel171217@db-usinas.c54mquckeem4.us-east-2.rds.amazonaws.com/postgres"
+    MINHA_API_KEY = "AIzaSyCGOAfn25qJ5yZSc9PmZR04MRDGD-mesk8" 
 
 # Conexão Banco
 engine = create_engine(DB_CONFIG)
@@ -138,8 +138,14 @@ def sugerir_proximo_rateio(dados_json, id_geradora, api_key):
     client = genai.Client(api_key=api_key)
     prompt_ia = f"""
     Analise estes dados: {dados_json}
-    Sugira o 'Próximo Rateio %' para equilibrar créditos.
-    Unidade geradora {id_geradora} deve ser 0.
+    Sugira o 'Próximo Rateio %' para equilibrar créditos da usina.
+    
+    REGRAS DE OURO (META: 2 MESES DE AUTONOMIA):
+    1. Unidade Geradora ({id_geradora}): Rateio deve ser 0.0.
+    2. Se Meses de Crédito > 2.5: Reduza o rateio (Crédito Alto).
+    3. Se Meses de Crédito < 1.7: Aumente o rateio (Crédito Baixo).
+    4. Tente manter a soma próxima de 100%.
+    
     Retorne JSON: {{"codigo_cliente": valor_float}}
     """
     resp = client.models.generate_content(model='gemini-3-flash-preview', contents=prompt_ia)
@@ -148,11 +154,21 @@ def sugerir_proximo_rateio(dados_json, id_geradora, api_key):
     except:
         return {} 
 
+    # Normalização Matemática
     if id_geradora in sugestoes: sugestoes[id_geradora] = 0.0
     soma = sum(sugestoes.values())
     if soma > 0:
         fator = 100.0 / soma
         for k in sugestoes: sugestoes[k] = round(sugestoes[k] * fator, 2)
+        
+        # Ajuste fino
+        nova_soma = sum(sugestoes.values())
+        diff = 100.0 - nova_soma
+        if abs(diff) > 0.0001:
+            clientes_validos = {k: v for k, v in sugestoes.items() if k != id_geradora}
+            if clientes_validos:
+                maior = max(clientes_validos, key=clientes_validos.get)
+                sugestoes[maior] = round(sugestoes[maior] + diff, 2)
     return sugestoes
 
 def clean_val(val):
@@ -208,7 +224,7 @@ else:
                 df_historico_raw, df_rateio_final = carregar_dados_banco(id_existente)
                 usar_dados_banco = True
             else:
-                st.warning("⚡ Novo processamento...")
+                st.warning("⚡ Novo processamento IA iniciado...")
                 df_historico_raw = pd.DataFrame(dados_ia['tabela_13_meses'])
                 df_saldo_raw = pd.DataFrame(dados_ia['resumo_saldo'])
                 for col in ['consumo', 'injetado']: df_historico_raw[col] = df_historico_raw[col].apply(clean_val)
@@ -243,15 +259,18 @@ if df_historico_raw is not None and df_rateio_final is not None:
         except:
             df_rateio_final['Próximo Rateio %'] = df_rateio_final['Rateio Ideal %']
 
+        # Definição de Observações (NOVAS REGRAS)
         def definir_obs(row):
-            if row['Meses de Crédito'] > 4: return "Crédito Alto: Sugerido reduzir rateio"
-            if row['Meses de Crédito'] < 1 and row['codigo_cliente'] != id_geradora: return "Crédito Baixo: Sugerido aumentar rateio"
+            if row['Meses de Crédito'] > 2.5: return "Crédito Alto: Sugerido reduzir rateio"
+            if row['Meses de Crédito'] < 1.7 and row['codigo_cliente'] != id_geradora: return "Crédito Baixo: Sugerido aumentar rateio"
             return "Equilibrado"
+        
         df_rateio_final['Observações'] = df_rateio_final.apply(definir_obs, axis=1)
+        
+        # TRAVA DE SEGURANÇA: Zera a geradora
+        df_rateio_final.loc[df_rateio_final['codigo_cliente'] == id_geradora, 'Próximo Rateio %'] = 0.0
+        
         salvar_processamento(meta_dados, df_historico_raw, df_rateio_final)
-
-    # --- FORÇAR ZERO NA GERADORA ---
-    df_rateio_final.loc[df_rateio_final['codigo_cliente'] == id_geradora, 'Próximo Rateio %'] = 0.0
 
     # Header
     st.info(f"Relatório: **{meta_dados.get('periodo')}** | Geradora: **{meta_dados.get('geradora_nome')}** | Média Geração: **{media_geracao:,.2f} kWh**")
@@ -269,7 +288,6 @@ if df_historico_raw is not None and df_rateio_final is not None:
 
     with tab2:
         df_view_saldo = df_rateio_final[['codigo_cliente', 'saldo_acumulado', 'percentual_compensacao']].copy()
-        # Formatação para View
         df_view_saldo['saldo_acumulado'] = df_view_saldo['saldo_acumulado'].apply(lambda x: f"{float(x):.2f}")
         df_view_saldo['percentual_compensacao'] = df_view_saldo['percentual_compensacao'].apply(lambda x: f"{float(x):.2f}%")
         st.dataframe(df_view_saldo, use_container_width=True)
@@ -285,20 +303,22 @@ if df_historico_raw is not None and df_rateio_final is not None:
             }
             df_view = df_view.rename(columns=mapeamento)
         
-        # Formatação Visual RIGOROSA (2 casas decimais)
+        # --- FORMATAÇÃO VISUAL RIGOROSA (2 CASAS DECIMAIS) ---
         cols_float = ['Média Consumo', 'saldo_acumulado', 'Crédito Ideal', 'Meses de Crédito']
         for col in cols_float:
             if col in df_view.columns:
                 df_view[col] = df_view[col].apply(lambda x: f"{float(x):.2f}")
         
-        cols_pct = ['Rateio Ideal %', 'Rateio Atual %', 'Próximo Rateio %']
-        # Mapeia Rateio Atual caso tenha outro nome
-        if 'percentual_compensacao' in df_view.columns: df_view['Rateio Atual %'] = df_view['percentual_compensacao']
+        # Colunas Percentuais
+        df_view['Rateio Ideal %'] = df_view['Rateio Ideal %'].apply(lambda x: f"{float(x):.2f}%")
         
-        for col in cols_pct:
-            if col in df_view.columns:
-                df_view[col] = df_view[col].apply(lambda x: f"{float(x):.2f}%")
+        # Ajuste Rateio Atual
+        if 'percentual_compensacao' in df_view.columns:
+             df_view['Rateio Atual %'] = df_view['percentual_compensacao'].apply(lambda x: f"{float(x):.2f}%")
+        
+        df_view['Próximo Rateio %'] = df_view['Próximo Rateio %'].apply(lambda x: f"{float(x):.2f}%")
 
+        # Seleção de Colunas
         colunas_finais = ['codigo_cliente', 'Média Consumo', 'saldo_acumulado', 'Crédito Ideal', 
                           'Meses de Crédito', 'Rateio Ideal %', 'Rateio Atual %', 'Próximo Rateio %', 'Observações']
         cols_validas = [c for c in colunas_finais if c in df_view.columns]
