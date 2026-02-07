@@ -13,9 +13,8 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="Blue Solutions - Gestão Energética", layout="wide")
 
 # Tenta pegar dos Segredos, senão usa string direta (Fallback para testes locais)
-try:
-    DB_CONFIG = st.secrets["database"]["url"]
-    MINHA_API_KEY = st.secrets["gemini"]["api_key"]
+DB_CONFIG = st.secrets["database"]["url"]
+MINHA_API_KEY = st.secrets["gemini"]["api_key"]
 
 # Conexão Banco
 engine = create_engine(DB_CONFIG)
@@ -329,4 +328,5 @@ if df_historico_raw is not None and df_rateio_final is not None:
             return [''] * len(row)
 
         st.dataframe(df_view.style.apply(style_rows, axis=1), use_container_width=True)
+
 
