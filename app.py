@@ -10,7 +10,7 @@ import plotly.graph_objects as go
 # =================================================================
 # 1. CONFIGURAÇÕES E SEGURANÇA
 # =================================================================
-st.set_page_config(page_title="Casa do Ar - Gestão Energética", layout="wide")
+st.set_page_config(page_title="Blue Solutions - Gestão Energética", layout="wide")
 
 # Configurações de conexão
 DB_CONFIG = st.secrets["database"]["url"]
